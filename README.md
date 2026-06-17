@@ -1,6 +1,6 @@
-# PK2 Workbench PRO by kahme247
+# PK2 Workbench PRO
 
-PK2 Workbench PRO by kahme247 is a clean Windows-native rebuild of the old Joymax/ZeraPain PK2 editor and extractor workflow.
+PK2 Workbench PRO is a clean Windows-native rebuild of the old Joymax/ZeraPain PK2 editor and extractor workflow.
 
 The original folder only contains binaries, so this project is a fresh implementation:
 
