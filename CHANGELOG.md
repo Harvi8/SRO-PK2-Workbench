@@ -33,6 +33,15 @@ The existing `.bak` backup behavior remains enabled for every save. `File > Save
 - Added regression coverage for persisted byte replacement, multi-division server configuration, gateway ports, and both supported `SV.T` encryption byte orders.
 - Updated the About dialog to display the application version.
 
+### Archive integrity fixes
+
+- Preserve the existing PK2 file size during normal saves when compacted content would otherwise make the archive unexpectedly smaller.
+- Preserve the complete original 256-byte Joymax header, including the version, encryption flag, and launcher verification bytes.
+- Reopen the rewritten archive after every Save and Save As operation so later automatic saves always use refreshed file offsets.
+- Prevent repeated saves in the same session from reading unchanged payloads at stale positions.
+- Added regression coverage for physical-size preservation, header identity, and consecutive saves after file-size changes.
+- Validated two consecutive saves against a disposable copy of a real 732 MB `Media.pk2`, retaining all 19,632 entries and configuration payloads.
+
 ## 0.1.0 - 2026-07-12
 
 - Initial public source release of PK2 Workbench PRO.

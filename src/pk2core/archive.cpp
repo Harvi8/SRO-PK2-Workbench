@@ -681,6 +681,7 @@ Pk2Archive Pk2Archive::open(const fs::path& path, std::string password) {
     root->type = EntryType::Folder;
     Pk2Archive archive(std::move(root), std::move(password));
     archive.sourcePath_ = path;
+    archive.sourceHeader_ = header;
 
     std::optional<DecodedBlock> rootBlock;
     std::uint64_t rootOffset = kHeaderSize;
@@ -783,6 +784,27 @@ std::optional<EntryInfo> Pk2Archive::find(const std::string& archivePath) const 
         return std::nullopt;
     }
     return makeInfo(*node);
+}
+
+void extendFileChecked(const fs::path& path, std::uint64_t minimumSize) {
+    const auto currentSize = fileSizeChecked(path, "Could not inspect rewritten archive size");
+    if (currentSize >= minimumSize) {
+        return;
+    }
+    if (minimumSize > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+        throw Pk2Error("Requested archive size is too large for this platform.");
+    }
+
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    if (!file) {
+        throw Pk2Error("Could not reopen rewritten archive for size preservation: " +
+                       pathUtf8(path));
+    }
+    file.seekp(static_cast<std::streamoff>(minimumSize - 1), std::ios::beg);
+    file.put('\0');
+    if (!file) {
+        throw Pk2Error("Could not preserve original archive size: " + pathUtf8(path));
+    }
 }
 
 std::vector<std::uint8_t> Pk2Archive::readFile(const std::string& archivePath) const {
@@ -1226,38 +1248,43 @@ void Pk2Archive::save() {
         throw Pk2Error("This archive has no source path. Use Save As first.");
     }
 
-    fs::path backup = sourcePath_;
-    backup += L".bak";
-    copyFileChecked(sourcePath_, backup);
+    const auto originalPath = sourcePath_;
+    const auto originalSize = fileSizeChecked(originalPath, "Could not inspect source archive size");
 
-    fs::path temp = sourcePath_;
+    fs::path backup = originalPath;
+    backup += L".bak";
+    copyFileChecked(originalPath, backup);
+
+    fs::path temp = originalPath;
     temp += L".tmp";
     writeArchive(temp);
-    (void)Pk2Archive::open(temp, password_);
+    extendFileChecked(temp, originalSize);
+    auto reopened = Pk2Archive::open(temp, password_);
     try {
-        removeChecked(sourcePath_);
-        renameChecked(temp, sourcePath_);
+        removeChecked(originalPath);
+        renameChecked(temp, originalPath);
     } catch (...) {
-        if (!existsChecked(sourcePath_, "Could not inspect source archive") &&
+        if (!existsChecked(originalPath, "Could not inspect source archive") &&
             existsChecked(backup, "Could not inspect backup archive")) {
-            copyFileChecked(backup, sourcePath_);
+            copyFileChecked(backup, originalPath);
         }
         throw;
     }
-    dirty_ = false;
+    reopened.sourcePath_ = originalPath;
+    *this = std::move(reopened);
 }
 
 void Pk2Archive::saveAs(const fs::path& outputPath) {
     fs::path temp = outputPath;
     temp += L".tmp";
     writeArchive(temp);
-    (void)Pk2Archive::open(temp, password_);
+    auto reopened = Pk2Archive::open(temp, password_);
     if (existsChecked(outputPath, "Could not inspect output archive")) {
         removeChecked(outputPath);
     }
     renameChecked(temp, outputPath);
-    sourcePath_ = outputPath;
-    dirty_ = false;
+    reopened.sourcePath_ = outputPath;
+    *this = std::move(reopened);
 }
 
 void Pk2Archive::writeArchive(const fs::path& outputPath) const {
@@ -1325,10 +1352,14 @@ void Pk2Archive::writeArchive(const fs::path& outputPath) const {
     }
 
     std::array<std::uint8_t, kHeaderSize> header{};
-    const std::string headerName = "JoyMax File Manager!\n";
-    std::copy(headerName.begin(), headerName.end(), header.begin());
-    writeU32Le(header.data() + 30, 0x00000100);
-    writeU64Le(header.data() + 34, folderBlocks.at(root_.get()));
+    if (sourceHeader_.size() == kHeaderSize) {
+        std::copy(sourceHeader_.begin(), sourceHeader_.end(), header.begin());
+    } else {
+        const std::string headerName = "JoyMax File Manager!\n";
+        std::copy(headerName.begin(), headerName.end(), header.begin());
+        writeU32Le(header.data() + 30, 2);
+        header[34] = isEncryptedMode(cryptoMode_) ? 1 : 0;
+    }
     output.write(reinterpret_cast<const char*>(header.data()), header.size());
 
     const auto writeName = [](std::uint8_t* entryBase, const std::string& name) {

@@ -109,6 +109,7 @@ private:
 
     std::unique_ptr<Node> root_;
     std::filesystem::path sourcePath_;
+    std::vector<std::uint8_t> sourceHeader_;
     std::string password_;
     CryptoMode cryptoMode_;
     bool dirty_{false};

@@ -26,6 +26,15 @@ std::string readText(const fs::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+std::vector<std::uint8_t> readPrefix(const fs::path& path, std::size_t size) {
+    std::ifstream input(path, std::ios::binary);
+    assert(input);
+    std::vector<std::uint8_t> bytes(size);
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    assert(input.gcount() == static_cast<std::streamsize>(bytes.size()));
+    return bytes;
+}
+
 fs::path testRoot() {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     return fs::temp_directory_path() / ("clean_pk2_tests_" + std::to_string(stamp));
@@ -64,6 +73,20 @@ void testArchiveRoundTrip() {
     archive.importFile(source / "hello.txt", "Data/hello.txt");
     archive.importFolder(source / "nested", "Data/nested");
     archive.saveAs(archivePath);
+    const auto originalHeader = readPrefix(archivePath, 256);
+    assert(originalHeader[30] == 2);
+    assert(originalHeader[31] == 0);
+    assert(originalHeader[32] == 0);
+    assert(originalHeader[33] == 0);
+    assert(originalHeader[34] == 1);
+
+    {
+        std::ofstream padding(archivePath, std::ios::binary | std::ios::app);
+        assert(padding);
+        std::vector<char> bytes(4096, 0);
+        padding.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    const auto paddedArchiveSize = fs::file_size(archivePath);
 
     auto reopened = pk2::Pk2Archive::open(archivePath, "169841");
     const auto entries = reopened.listTree();
@@ -76,12 +99,23 @@ void testArchiveRoundTrip() {
     const auto updatedBytes = reopened.readFile("Data/hello.txt");
     assert(std::string(updatedBytes.begin(), updatedBytes.end()) == "updated");
     reopened.save();
-    reopened = pk2::Pk2Archive::open(archivePath, "169841");
+    assert(fs::file_size(archivePath) == paddedArchiveSize);
+    assert(readPrefix(archivePath, 256) == originalHeader);
     const auto savedBytes = reopened.readFile("Data/hello.txt");
     assert(std::string(savedBytes.begin(), savedBytes.end()) == "updated");
 
+    reopened.importFileBytes({'u', 'p', 'd', 'a', 't', 'e', 'd', ' ', 'a', 'g', 'a', 'i', 'n'},
+                             "Data/hello.txt");
+    reopened.save();
+    reopened = pk2::Pk2Archive::open(archivePath, "169841");
+    assert(readPrefix(archivePath, 256) == originalHeader);
+    const auto twiceSavedBytes = reopened.readFile("Data/hello.txt");
+    assert(std::string(twiceSavedBytes.begin(), twiceSavedBytes.end()) == "updated again");
+    const auto untouchedBytes = reopened.readFile("Data/nested/world.txt");
+    assert(std::string(untouchedBytes.begin(), untouchedBytes.end()) == "nested data");
+
     reopened.extract("Data", extracted, true, pk2::OverwritePolicy::Replace);
-    assert(readText(extracted / "Data" / "hello.txt") == "updated");
+    assert(readText(extracted / "Data" / "hello.txt") == "updated again");
     assert(readText(extracted / "Data" / "nested" / "world.txt") == "nested data");
 
     reopened.deleteEntry("Data/hello.txt");
