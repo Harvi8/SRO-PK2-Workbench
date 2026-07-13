@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(PK2WorkbenchPRO
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "PK2 Workbench PRO by kahme247"
     LANGUAGES CXX)
 
@@ -12,7 +12,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(pk2core STATIC
     src/pk2core/archive.cpp
     src/pk2core/crypto.cpp
-    src/pk2core/path.cpp)
+    src/pk2core/path.cpp
+    src/pk2core/server_config.cpp)
 
 target_include_directories(pk2core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include)

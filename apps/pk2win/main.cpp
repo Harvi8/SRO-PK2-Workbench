@@ -2,6 +2,7 @@
 
 #include "pk2/archive.h"
 #include "pk2/path.h"
+#include "pk2/server_config.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,10 +15,12 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -85,6 +88,7 @@ HGLOBAL createDropEffectGlobal(DWORD effect) {
 constexpr const wchar_t* kAppTitle = L"PK2 Workbench PRO - by kahme247";
 constexpr const wchar_t* kAppTitlePrefix = L"PK2 Workbench PRO";
 constexpr const wchar_t* kAppCredit = L"by kahme247";
+constexpr const wchar_t* kAppVersion = L"0.2.0";
 
 std::wstring absolutePathWide(const fs::path& path) {
     const auto input = path.wstring();
@@ -507,6 +511,7 @@ void setBusy(bool busy, const std::wstring& statusText) {
         EnableMenuItem(menu, IDM_IMPORT_FILE, MF_BYCOMMAND | enabled);
         EnableMenuItem(menu, IDM_IMPORT_FOLDER, MF_BYCOMMAND | enabled);
         EnableMenuItem(menu, IDM_DELETE_ENTRY, MF_BYCOMMAND | enabled);
+        EnableMenuItem(menu, IDM_TOOLS_SERVER_CONFIG, MF_BYCOMMAND | enabled);
         DrawMenuBar(gMain);
     }
 
@@ -646,6 +651,214 @@ std::optional<std::string> askPassword() {
         return std::nullopt;
     }
     return toUtf8(password);
+}
+
+struct ServerConfigDialogState {
+    pk2::ServerConfig config;
+    int selectedDivision{-1};
+    int selectedGateway{-1};
+};
+
+std::wstring dialogText(HWND dialog, int controlId) {
+    const auto length = GetWindowTextLengthW(GetDlgItem(dialog, controlId));
+    std::wstring value(static_cast<std::size_t>(length) + 1, L'\0');
+    if (length > 0) {
+        GetDlgItemTextW(dialog, controlId, value.data(), length + 1);
+    }
+    value.resize(static_cast<std::size_t>(length));
+    return value;
+}
+
+void refreshGatewayList(HWND dialog, ServerConfigDialogState& state) {
+    const auto list = GetDlgItem(dialog, IDC_GATEWAY_LIST);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    state.selectedGateway = -1;
+    SetDlgItemTextW(dialog, IDC_GATEWAY_URL, L"");
+    if (state.selectedDivision < 0 ||
+        state.selectedDivision >= static_cast<int>(state.config.divisions.size())) {
+        return;
+    }
+    const auto& gateways = state.config.divisions[static_cast<std::size_t>(state.selectedDivision)].gateways;
+    for (const auto& gateway : gateways) {
+        const auto text = toWide(gateway);
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    }
+    if (!gateways.empty()) {
+        state.selectedGateway = 0;
+        SendMessageW(list, LB_SETCURSEL, 0, 0);
+        SetDlgItemTextW(dialog, IDC_GATEWAY_URL, toWide(gateways[0]).c_str());
+    }
+}
+
+void selectDivision(HWND dialog, ServerConfigDialogState& state, int index) {
+    if (index < 0 || index >= static_cast<int>(state.config.divisions.size())) {
+        state.selectedDivision = -1;
+        SetDlgItemTextW(dialog, IDC_DIVISION_NAME, L"");
+        refreshGatewayList(dialog, state);
+        return;
+    }
+    state.selectedDivision = index;
+    SendDlgItemMessageW(dialog, IDC_DIVISION_LIST, LB_SETCURSEL, index, 0);
+    const auto& division = state.config.divisions[static_cast<std::size_t>(index)];
+    SetDlgItemTextW(dialog, IDC_DIVISION_NAME, toWide(division.name).c_str());
+    refreshGatewayList(dialog, state);
+}
+
+void refreshDivisionList(HWND dialog, ServerConfigDialogState& state, int selection) {
+    const auto list = GetDlgItem(dialog, IDC_DIVISION_LIST);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (const auto& division : state.config.divisions) {
+        const auto text = toWide(division.name);
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    }
+    selectDivision(dialog, state, selection);
+}
+
+void showDialogError(HWND dialog, const std::exception& ex) {
+    const auto message = exceptionMessage(ex);
+    MessageBoxW(dialog, message.c_str(), L"Server Configuration", MB_OK | MB_ICONERROR);
+}
+
+std::uint32_t dialogUnsigned(HWND dialog, int controlId, const char* label, std::uint32_t maximum) {
+    BOOL translated = FALSE;
+    const auto value = GetDlgItemInt(dialog, controlId, &translated, FALSE);
+    if (!translated || value > maximum) {
+        throw pk2::Pk2Error(std::string(label) + " must be between 0 and " +
+                            std::to_string(maximum) + ".");
+    }
+    return value;
+}
+
+INT_PTR CALLBACK serverConfigDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<ServerConfigDialogState*>(
+        GetWindowLongPtrW(dialog, GWLP_USERDATA));
+    try {
+        switch (message) {
+        case WM_INITDIALOG:
+            state = reinterpret_cast<ServerConfigDialogState*>(lParam);
+            SetWindowLongPtrW(dialog, GWLP_USERDATA, lParam);
+            SetDlgItemInt(dialog, IDC_CONTENT_ID, state->config.contentId, FALSE);
+            SetDlgItemInt(dialog, IDC_SERVER_VERSION, state->config.version, FALSE);
+            SetDlgItemInt(dialog, IDC_GATEWAY_PORT, state->config.port, FALSE);
+            refreshDivisionList(dialog, *state, 0);
+            return TRUE;
+        case WM_COMMAND: {
+            if (state == nullptr) {
+                return FALSE;
+            }
+            const auto id = LOWORD(wParam);
+            const auto notification = HIWORD(wParam);
+            if (id == IDC_DIVISION_LIST && notification == LBN_SELCHANGE) {
+                const auto selection = static_cast<int>(
+                    SendDlgItemMessageW(dialog, IDC_DIVISION_LIST, LB_GETCURSEL, 0, 0));
+                selectDivision(dialog, *state, selection);
+                return TRUE;
+            }
+            if (id == IDC_GATEWAY_LIST && notification == LBN_SELCHANGE) {
+                const auto selection = static_cast<int>(
+                    SendDlgItemMessageW(dialog, IDC_GATEWAY_LIST, LB_GETCURSEL, 0, 0));
+                state->selectedGateway = selection;
+                if (selection >= 0 && state->selectedDivision >= 0) {
+                    const auto& gateway = state->config.divisions[
+                        static_cast<std::size_t>(state->selectedDivision)].gateways[
+                        static_cast<std::size_t>(selection)];
+                    SetDlgItemTextW(dialog, IDC_GATEWAY_URL, toWide(gateway).c_str());
+                }
+                return TRUE;
+            }
+            if (id == IDC_DIVISION_ADD) {
+                const auto name = toUtf8(dialogText(dialog, IDC_DIVISION_NAME));
+                state->config.divisions.push_back({name, {}});
+                refreshDivisionList(dialog, *state,
+                                    static_cast<int>(state->config.divisions.size() - 1));
+                return TRUE;
+            }
+            if (id == IDC_DIVISION_UPDATE && state->selectedDivision >= 0) {
+                state->config.divisions[static_cast<std::size_t>(state->selectedDivision)].name =
+                    toUtf8(dialogText(dialog, IDC_DIVISION_NAME));
+                refreshDivisionList(dialog, *state, state->selectedDivision);
+                return TRUE;
+            }
+            if (id == IDC_DIVISION_REMOVE && state->selectedDivision >= 0) {
+                const auto index = state->selectedDivision;
+                state->config.divisions.erase(state->config.divisions.begin() + index);
+                const auto next = std::min(index,
+                    static_cast<int>(state->config.divisions.size()) - 1);
+                refreshDivisionList(dialog, *state, next);
+                return TRUE;
+            }
+            if ((id == IDC_GATEWAY_ADD || id == IDC_GATEWAY_UPDATE ||
+                 id == IDC_GATEWAY_REMOVE) && state->selectedDivision < 0) {
+                throw pk2::Pk2Error("Select or add a division first.");
+            }
+            if (id == IDC_GATEWAY_ADD) {
+                auto& gateways = state->config.divisions[
+                    static_cast<std::size_t>(state->selectedDivision)].gateways;
+                gateways.push_back(toUtf8(dialogText(dialog, IDC_GATEWAY_URL)));
+                refreshGatewayList(dialog, *state);
+                state->selectedGateway = static_cast<int>(gateways.size() - 1);
+                SendDlgItemMessageW(dialog, IDC_GATEWAY_LIST, LB_SETCURSEL,
+                                    state->selectedGateway, 0);
+                SetDlgItemTextW(dialog, IDC_GATEWAY_URL,
+                                toWide(gateways.back()).c_str());
+                return TRUE;
+            }
+            if (id == IDC_GATEWAY_UPDATE && state->selectedGateway >= 0) {
+                auto& gateways = state->config.divisions[
+                    static_cast<std::size_t>(state->selectedDivision)].gateways;
+                gateways[static_cast<std::size_t>(state->selectedGateway)] =
+                    toUtf8(dialogText(dialog, IDC_GATEWAY_URL));
+                const auto selection = state->selectedGateway;
+                refreshGatewayList(dialog, *state);
+                state->selectedGateway = selection;
+                SendDlgItemMessageW(dialog, IDC_GATEWAY_LIST, LB_SETCURSEL, selection, 0);
+                SetDlgItemTextW(dialog, IDC_GATEWAY_URL,
+                                toWide(gateways[static_cast<std::size_t>(selection)]).c_str());
+                return TRUE;
+            }
+            if (id == IDC_GATEWAY_REMOVE && state->selectedGateway >= 0) {
+                auto& gateways = state->config.divisions[
+                    static_cast<std::size_t>(state->selectedDivision)].gateways;
+                gateways.erase(gateways.begin() + state->selectedGateway);
+                refreshGatewayList(dialog, *state);
+                return TRUE;
+            }
+            if (id == IDOK) {
+                if (state->selectedDivision >= 0) {
+                    state->config.divisions[static_cast<std::size_t>(state->selectedDivision)].name =
+                        toUtf8(dialogText(dialog, IDC_DIVISION_NAME));
+                    if (state->selectedGateway >= 0) {
+                        state->config.divisions[
+                            static_cast<std::size_t>(state->selectedDivision)].gateways[
+                            static_cast<std::size_t>(state->selectedGateway)] =
+                            toUtf8(dialogText(dialog, IDC_GATEWAY_URL));
+                    }
+                }
+                state->config.contentId = static_cast<std::uint8_t>(
+                    dialogUnsigned(dialog, IDC_CONTENT_ID, "Content ID", 255));
+                state->config.version = dialogUnsigned(
+                    dialog, IDC_SERVER_VERSION, "Version", std::numeric_limits<std::uint32_t>::max());
+                state->config.port = static_cast<std::uint16_t>(
+                    dialogUnsigned(dialog, IDC_GATEWAY_PORT, "Gateway port", 65535));
+                (void)pk2::serializeDivisionInfo(state->config);
+                (void)pk2::serializeGatePort(state->config);
+                (void)pk2::serializeServerVersion(state->config);
+                EndDialog(dialog, IDOK);
+                return TRUE;
+            }
+            if (id == IDCANCEL) {
+                EndDialog(dialog, IDCANCEL);
+                return TRUE;
+            }
+            return FALSE;
+        }
+        default:
+            return FALSE;
+        }
+    } catch (const std::exception& ex) {
+        showDialogError(dialog, ex);
+        return TRUE;
+    }
 }
 
 std::wstring treeItemText(HTREEITEM item) {
@@ -1128,10 +1341,13 @@ void startImportPaths(std::vector<fs::path> paths, std::string targetFolder) {
                                         pk2::pathUtf8(path));
                 }
             }
+            gArchive.save();
             result->ok = true;
             result->archiveChanged = true;
             result->refreshFolder = targetFolder;
-            result->message = paths.size() == 1 ? L"Import complete." : L"Imports complete.";
+            result->message = paths.size() == 1
+                                  ? L"Import complete and saved."
+                                  : L"Imports complete and saved.";
         } catch (const std::exception& ex) {
             result->ok = false;
             result->archiveChanged = true;
@@ -1308,10 +1524,71 @@ void deleteSelected() {
     }
     try {
         gArchive.deleteEntry(*path);
+        gArchive.save();
         populateTree();
         populateList(gCurrentFolder);
-        setStatus(L"Entry deleted.");
+        setStatus(L"Entry deleted and saved.");
         updateTitle();
+    } catch (const std::exception& ex) {
+        showError(ex);
+    }
+}
+
+bool equalsAsciiInsensitive(std::string_view left, std::string_view right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(), [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) ==
+                      std::tolower(static_cast<unsigned char>(b));
+           });
+}
+
+std::string rootConfigPath(std::string_view fileName) {
+    for (const auto& entry : gArchive.children("")) {
+        if (entry.type == pk2::EntryType::File && equalsAsciiInsensitive(entry.name, fileName)) {
+            return entry.path;
+        }
+    }
+    throw pk2::Pk2Error("This PK2 does not contain root-level " + std::string(fileName) + ".");
+}
+
+void editServerConfiguration() {
+    if (gBusy) {
+        setStatus(L"Please wait for the current operation to finish.");
+        return;
+    }
+    if (!gLoaded) {
+        setStatus(L"Open Media.pk2 first.");
+        return;
+    }
+
+    try {
+        const auto divisionPath = rootConfigPath("DIVISIONINFO.TXT");
+        const auto portPath = rootConfigPath("GATEPORT.TXT");
+        const auto versionPath = rootConfigPath("SV.T");
+        ServerConfigDialogState state;
+        state.config = pk2::parseServerConfig(gArchive.readFile(divisionPath),
+                                               gArchive.readFile(portPath),
+                                               gArchive.readFile(versionPath));
+        const auto result = DialogBoxParamW(gInstance,
+                                            MAKEINTRESOURCEW(IDD_SERVER_CONFIG),
+                                            gMain,
+                                            serverConfigDialogProc,
+                                            reinterpret_cast<LPARAM>(&state));
+        if (result != IDOK) {
+            return;
+        }
+
+        auto divisionBytes = pk2::serializeDivisionInfo(state.config);
+        auto portBytes = pk2::serializeGatePort(state.config);
+        auto versionBytes = pk2::serializeServerVersion(state.config);
+        gArchive.importFileBytes(std::move(divisionBytes), divisionPath);
+        gArchive.importFileBytes(std::move(portBytes), portPath);
+        gArchive.importFileBytes(std::move(versionBytes), versionPath);
+        gArchive.save();
+        populateTree();
+        populateList(validRefreshFolder(gCurrentFolder));
+        updateTitle();
+        setStatus(L"Server configuration updated and saved.");
     } catch (const std::exception& ex) {
         showError(ex);
     }
@@ -1331,6 +1608,8 @@ void showMd5Helper() {
 void showAbout() {
     std::wstring message = L"PK2 Workbench PRO\r\n";
     message += kAppCredit;
+    message += L"\r\nVersion ";
+    message += kAppVersion;
     message += L"\r\n\r\nAll-in-one PK2 editor, extractor, importer, and archive browser.";
     MessageBoxW(gMain, message.c_str(), L"About PK2 Workbench PRO", MB_OK | MB_ICONINFORMATION);
 }
@@ -1522,6 +1801,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             break;
         case IDM_DELETE_ENTRY:
             deleteSelected();
+            break;
+        case IDM_TOOLS_SERVER_CONFIG:
+            editServerConfiguration();
             break;
         case IDM_HELP_MD5:
             showMd5Helper();

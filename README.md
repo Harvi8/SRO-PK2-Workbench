@@ -41,10 +41,12 @@ build\Release\pk2cli.exe md5 "private server blowfish key"
 - File sizes are shown with readable units: `B`, `KB`, `MB`, and `GB`.
 - `Extract Shown` writes into a folder named after the archive stem. For example, extracting from `Data.pk2` into `C:\out` writes under `C:\out\Data`.
 - Files and folders can be dragged onto the window to import them into the currently selected archive folder.
+- Imports, drag-and-drop changes, deletions, and Server Configuration updates are saved automatically. Each save retains the existing `.bak` safety backup behavior.
 - Files and folders can be dragged out of the list/tree into Explorer to extract them by shell copy.
 - Opening, extracting, and importing run on background worker threads with a status-bar progress bar, so large operations should not freeze the window.
 - Windows filesystem paths are converted through UTF-8 helpers, so non-ANSI folder and file names can be used without code-page conversion errors.
 - Flat PK2 archives with root-level files and no folders show a `[root files]` item in the tree and a count summary in the status bar.
+- `Tools > Server Configuration` provides an integrated IPInput-style editor for the root-level `DIVISIONINFO.TXT`, `GATEPORT.TXT`, and encrypted `SV.T` files in `Media.pk2`. It supports multiple divisions and gateway URLs plus Content ID, gateway port, and client version.
 
 ## Current Compatibility Notes
 

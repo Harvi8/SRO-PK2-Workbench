@@ -1,7 +1,9 @@
 #include "pk2/archive.h"
 #include "pk2/crypto.h"
 #include "pk2/path.h"
+#include "pk2/server_config.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -68,15 +70,71 @@ void testArchiveRoundTrip() {
     assert(entries.size() == 4);
     assert(reopened.find("Data/hello.txt").has_value());
     assert(reopened.find("Data/nested/world.txt").has_value());
+    const auto helloBytes = reopened.readFile("Data/hello.txt");
+    assert(std::string(helloBytes.begin(), helloBytes.end()) == "hello pk2");
+    reopened.importFileBytes({'u', 'p', 'd', 'a', 't', 'e', 'd'}, "Data/hello.txt");
+    const auto updatedBytes = reopened.readFile("Data/hello.txt");
+    assert(std::string(updatedBytes.begin(), updatedBytes.end()) == "updated");
+    reopened.save();
+    reopened = pk2::Pk2Archive::open(archivePath, "169841");
+    const auto savedBytes = reopened.readFile("Data/hello.txt");
+    assert(std::string(savedBytes.begin(), savedBytes.end()) == "updated");
 
     reopened.extract("Data", extracted, true, pk2::OverwritePolicy::Replace);
-    assert(readText(extracted / "Data" / "hello.txt") == "hello pk2");
+    assert(readText(extracted / "Data" / "hello.txt") == "updated");
     assert(readText(extracted / "Data" / "nested" / "world.txt") == "nested data");
 
     reopened.deleteEntry("Data/hello.txt");
     assert(!reopened.find("Data/hello.txt").has_value());
 
     fs::remove_all(root);
+}
+
+void testServerConfigRoundTrip() {
+    pk2::ServerConfig original;
+    original.contentId = 22;
+    original.version = 188;
+    original.port = 15779;
+    original.versionEndian = pk2::BlockEndian::Little;
+    original.divisions = {
+        {"Private SRO", {"127.0.0.1", "gateway.example.com"}},
+        {"Second Division", {"10.0.0.25"}},
+    };
+
+    const auto divisionInfo = pk2::serializeDivisionInfo(original);
+    const auto gatePort = pk2::serializeGatePort(original);
+    const auto version = pk2::serializeServerVersion(original);
+    assert(gatePort.size() == 8);
+    assert(version.size() == 1024);
+    assert(std::all_of(version.begin() + 12, version.end(), [](std::uint8_t byte) {
+        return byte == 0;
+    }));
+
+    const auto parsed = pk2::parseServerConfig(divisionInfo, gatePort, version);
+    assert(parsed.contentId == 22);
+    assert(parsed.version == 188);
+    assert(parsed.port == 15779);
+    assert(parsed.versionEndian == pk2::BlockEndian::Little);
+    assert(parsed.versionBlockAtOffset4);
+    assert(parsed.divisions.size() == 2);
+    assert(parsed.divisions[0].name == "Private SRO");
+    assert(parsed.divisions[0].gateways.size() == 2);
+    assert(parsed.divisions[0].gateways[1] == "gateway.example.com");
+    assert(parsed.divisions[1].gateways[0] == "10.0.0.25");
+
+    original.versionEndian = pk2::BlockEndian::Big;
+    const auto bigEndianVersion = pk2::serializeServerVersion(original);
+    const auto parsedBig = pk2::parseServerConfig(divisionInfo, gatePort, bigEndianVersion);
+    assert(parsedBig.version == 188);
+    assert(parsedBig.versionEndian == pk2::BlockEndian::Big);
+
+    original.versionFile.assign(1024, 0);
+    original.versionFile[0] = 0x53;
+    original.versionFile[100] = 0x7a;
+    const auto preservedVersion = pk2::serializeServerVersion(original);
+    const auto parsedPreserved = pk2::parseServerConfig(divisionInfo, gatePort, preservedVersion);
+    assert(parsedPreserved.versionFile[0] == 0x53);
+    assert(parsedPreserved.versionFile[100] == 0x7a);
 }
 
 void testMultiBlockArchiveRoundTrip() {
@@ -204,6 +262,7 @@ int main() {
     testMd5();
     testBlowfishKnownVector();
     testArchiveRoundTrip();
+    testServerConfigRoundTrip();
     testMultiBlockArchiveRoundTrip();
     testCanonicalRootBlockWinsOverHeaderScanCandidate();
     testUnicodeFilesystemPathUtf8();

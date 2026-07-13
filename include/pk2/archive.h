@@ -67,6 +67,9 @@ public:
     std::vector<EntryInfo> listTree() const;
     std::vector<EntryInfo> children(const std::string& archiveFolderPath) const;
     std::optional<EntryInfo> find(const std::string& archivePath) const;
+    std::vector<std::uint8_t> readFile(const std::string& archivePath) const;
+    void importFileBytes(std::vector<std::uint8_t> bytes,
+                         const std::string& archivePath);
 
     void extract(const std::string& archivePath,
                  const std::filesystem::path& destination,

@@ -785,6 +785,51 @@ std::optional<EntryInfo> Pk2Archive::find(const std::string& archivePath) const 
     return makeInfo(*node);
 }
 
+std::vector<std::uint8_t> Pk2Archive::readFile(const std::string& archivePath) const {
+    const auto* node = findNode(archivePath);
+    if (node == nullptr || !node->isFile()) {
+        throw Pk2Error("Archive file was not found: " + archivePath);
+    }
+    if (node->imported) {
+        return node->importedData;
+    }
+    if (node->size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw Pk2Error("Archive file is too large to read into memory: " + archivePath);
+    }
+    ArchiveReader reader(sourcePath_);
+    return reader.readAt(node->sourceOffset, static_cast<std::size_t>(node->size));
+}
+
+void Pk2Archive::importFileBytes(std::vector<std::uint8_t> bytes,
+                                const std::string& archivePath) {
+    const auto normalized = normalizeArchivePath(archivePath);
+    const auto name = archiveFileName(normalized);
+    if (!isValidEntryName(name) || isReservedEntryName(name)) {
+        throw Pk2Error("Invalid PK2 entry name: " + name);
+    }
+
+    auto* folder = ensureFolder(archiveParentPath(normalized));
+    auto* existing = childByName(*folder, name);
+    if (existing != nullptr && existing->isFolder()) {
+        throw Pk2Error("A folder already exists at archive path: " + normalized);
+    }
+    Node* target = existing;
+    if (target == nullptr) {
+        auto node = std::make_unique<Node>();
+        node->type = EntryType::File;
+        node->name = name;
+        node->parent = folder;
+        target = node.get();
+        folder->children.push_back(std::move(node));
+    }
+    target->type = EntryType::File;
+    target->size = bytes.size();
+    target->sourceOffset = 0;
+    target->importedData = std::move(bytes);
+    target->imported = true;
+    dirty_ = true;
+}
+
 Pk2Archive::Node* Pk2Archive::findNode(const std::string& archivePath) {
     const auto normalized = normalizeArchivePath(archivePath);
     if (normalized.empty()) {
