@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(PK2WorkbenchPRO
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "PK2 Workbench PRO by kahme247"
     LANGUAGES CXX)
 
@@ -19,6 +19,7 @@ target_include_directories(pk2core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 if(MSVC)
+    add_compile_options(/EHsc)
     target_compile_options(pk2core PRIVATE /W4 /permissive-)
 else()
     target_compile_options(pk2core PRIVATE -Wall -Wextra -pedantic)

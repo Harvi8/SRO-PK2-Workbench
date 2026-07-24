@@ -38,6 +38,9 @@ build\Release\pk2cli.exe md5 "private server blowfish key"
 
 ## GUI Notes
 
+- Use the search box and **Search** button to find files or folders anywhere in the open archive by name or internal path.
+- When no archive is loaded, drag one `.pk2` file onto the window to open it.
+- Double-click a `.txt` entry to edit and save it directly inside the PK2 while preserving its original text encoding.
 - File sizes are shown with readable units: `B`, `KB`, `MB`, and `GB`.
 - `Extract Shown` writes into a folder named after the archive stem. For example, extracting from `Data.pk2` into `C:\out` writes under `C:\out\Data`.
 - Files and folders can be dragged onto the window to import them into the currently selected archive folder.

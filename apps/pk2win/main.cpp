@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -41,6 +42,8 @@ HWND gTree = nullptr;
 HWND gList = nullptr;
 HWND gStatus = nullptr;
 HWND gProgress = nullptr;
+HWND gSearch = nullptr;
+HWND gSearchButton = nullptr;
 DWORD gUiThreadId = 0;
 
 pk2::Pk2Archive gArchive;
@@ -88,7 +91,7 @@ HGLOBAL createDropEffectGlobal(DWORD effect) {
 constexpr const wchar_t* kAppTitle = L"PK2 Workbench PRO - by kahme247";
 constexpr const wchar_t* kAppTitlePrefix = L"PK2 Workbench PRO";
 constexpr const wchar_t* kAppCredit = L"by kahme247";
-constexpr const wchar_t* kAppVersion = L"0.2.0";
+constexpr const wchar_t* kAppVersion = L"0.3.0";
 
 std::wstring absolutePathWide(const fs::path& path) {
     const auto input = path.wstring();
@@ -492,6 +495,8 @@ void setBusy(bool busy, const std::wstring& statusText) {
     gBusy = busy;
     EnableWindow(gTree, busy ? FALSE : TRUE);
     EnableWindow(gList, busy ? FALSE : TRUE);
+    EnableWindow(gSearch, busy ? FALSE : TRUE);
+    EnableWindow(gSearchButton, busy ? FALSE : TRUE);
     DragAcceptFiles(gMain, busy ? FALSE : TRUE);
     setProgressVisible(busy);
     if (busy) {
@@ -1358,16 +1363,12 @@ void startImportPaths(std::vector<fs::path> paths, std::string targetFolder) {
     }).detach();
 }
 
-void openArchive() {
+void openArchivePath(const fs::path& archivePath) {
     if (gBusy) {
         setStatus(L"Please wait for the current operation to finish.");
         return;
     }
     try {
-        const auto file = openFileDialog(L"Open PK2", L"PK2 files (*.pk2)\0*.pk2\0All files\0*.*\0", false);
-        if (!file) {
-            return;
-        }
         const auto password = askPassword();
         if (!password) {
             return;
@@ -1375,7 +1376,6 @@ void openArchive() {
         resetViews();
         setBusy(true, L"Loading PK2 metadata...");
 
-        const auto archivePath = *file;
         const auto archivePassword = *password;
         const auto targetWindow = gMain;
         std::thread([archivePath, archivePassword, targetWindow]() {
@@ -1594,6 +1594,59 @@ void editServerConfiguration() {
     }
 }
 
+void openArchive() {
+    const auto file = openFileDialog(L"Open PK2", L"PK2 files (*.pk2)\0*.pk2\0All files\0*.*\0", false);
+    if (file) {
+        openArchivePath(*file);
+    }
+}
+
+std::wstring searchText() {
+    const auto length = GetWindowTextLengthW(gSearch);
+    std::wstring text(static_cast<std::size_t>(length) + 1, L'\0');
+    GetWindowTextW(gSearch, text.data(), length + 1);
+    text.resize(static_cast<std::size_t>(length));
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+    return text;
+}
+
+void populateSearchResults() {
+    const auto query = searchText();
+    if (query.empty()) {
+        populateList(gCurrentFolder);
+        return;
+    }
+
+    ListView_DeleteAllItems(gList);
+    int row = 0;
+    for (const auto& entry : gArchive.listTree()) {
+        auto searchable = toWide(entry.path);
+        std::transform(searchable.begin(), searchable.end(), searchable.begin(),
+                       [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+        if (searchable.find(query) == std::wstring::npos) {
+            continue;
+        }
+
+        const auto name = toWide(entry.name);
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = row;
+        item.pszText = const_cast<wchar_t*>(name.c_str());
+        ListView_InsertItem(gList, &item);
+        const auto type = entry.type == pk2::EntryType::Folder ? L"Folder" : L"File";
+        ListView_SetItemText(gList, row, 1, const_cast<wchar_t*>(type));
+        const auto size = entry.type == pk2::EntryType::File ? formatSize(entry.size) : L"";
+        ListView_SetItemText(gList, row, 2, const_cast<wchar_t*>(size.c_str()));
+        const auto path = toWide(entry.path);
+        ListView_SetItemText(gList, row, 3, const_cast<wchar_t*>(path.c_str()));
+        ++row;
+    }
+    std::wostringstream status;
+    status << row << L" search result" << (row == 1 ? L"." : L"s.");
+    setStatus(status.str());
+}
+
 void showMd5Helper() {
     const auto password = askPassword();
     if (!password) {
@@ -1614,6 +1667,189 @@ void showAbout() {
     MessageBoxW(gMain, message.c_str(), L"About PK2 Workbench PRO", MB_OK | MB_ICONINFORMATION);
 }
 
+struct TextEditorState {
+    std::wstring title;
+    std::wstring text;
+};
+
+INT_PTR CALLBACK textEditorDialogProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<TextEditorState*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    if (message == WM_INITDIALOG) {
+        state = reinterpret_cast<TextEditorState*>(lParam);
+        SetWindowLongPtrW(dialog, DWLP_USER, reinterpret_cast<LONG_PTR>(state));
+        SetWindowTextW(dialog, state->title.c_str());
+        SendDlgItemMessageW(dialog, IDC_TEXT_EDIT, EM_SETLIMITTEXT,
+                            64u * 1024u * 1024u, 0);
+        SetDlgItemTextW(dialog, IDC_TEXT_EDIT, state->text.c_str());
+        SendDlgItemMessageW(dialog, IDC_TEXT_EDIT, EM_SETSEL, 0, 0);
+        return TRUE;
+    }
+    if (message == WM_COMMAND) {
+        if (LOWORD(wParam) == IDOK && state != nullptr) {
+            const auto edit = GetDlgItem(dialog, IDC_TEXT_EDIT);
+            const auto length = GetWindowTextLengthW(edit);
+            std::wstring text(static_cast<std::size_t>(length) + 1, L'\0');
+            GetWindowTextW(edit, text.data(), length + 1);
+            text.resize(static_cast<std::size_t>(length));
+            state->text = std::move(text);
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+bool isTextEntry(const pk2::EntryInfo& entry) {
+    if (entry.type != pk2::EntryType::File || entry.name.size() < 4) {
+        return false;
+    }
+    auto extension = entry.name.substr(entry.name.size() - 4);
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return extension == ".txt";
+}
+
+enum class TextFileEncoding {
+    Utf8,
+    Utf8Bom,
+    Ansi,
+    Utf16LittleEndian,
+    Utf16BigEndian
+};
+
+struct DecodedTextFile {
+    std::wstring text;
+    TextFileEncoding encoding{TextFileEncoding::Utf8};
+};
+
+DecodedTextFile decodeTextFile(const std::vector<std::uint8_t>& bytes) {
+    DecodedTextFile result;
+    std::size_t offset = 0;
+    if (bytes.size() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        result.encoding = TextFileEncoding::Utf16LittleEndian;
+        offset = 2;
+    } else if (bytes.size() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        result.encoding = TextFileEncoding::Utf16BigEndian;
+        offset = 2;
+    }
+    if (offset != 0) {
+        if ((bytes.size() - offset) % 2 != 0) {
+            throw pk2::Pk2Error("The UTF-16 text file has an incomplete character.");
+        }
+        result.text.reserve((bytes.size() - offset) / 2);
+        for (std::size_t i = offset; i < bytes.size(); i += 2) {
+            const auto value = result.encoding == TextFileEncoding::Utf16LittleEndian
+                                   ? static_cast<std::uint16_t>(bytes[i] | (bytes[i + 1] << 8))
+                                   : static_cast<std::uint16_t>((bytes[i] << 8) | bytes[i + 1]);
+            result.text.push_back(static_cast<wchar_t>(value));
+        }
+        return result;
+    }
+
+    if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+        result.encoding = TextFileEncoding::Utf8Bom;
+        offset = 3;
+    }
+    const auto* data = bytes.empty()
+                           ? ""
+                           : reinterpret_cast<const char*>(bytes.data() + offset);
+    const auto size = static_cast<int>(bytes.size() - offset);
+    const auto wideSize = size == 0 ? 0 : MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, data, size, nullptr, 0);
+    if (size == 0 || wideSize > 0) {
+        result.text.resize(static_cast<std::size_t>(wideSize));
+        if (wideSize > 0) {
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data, size,
+                                result.text.data(), wideSize);
+        }
+        return result;
+    }
+
+    result.encoding = TextFileEncoding::Ansi;
+    const auto ansiSize = MultiByteToWideChar(CP_ACP, 0, data, size, nullptr, 0);
+    if (ansiSize <= 0) {
+        throw pk2::Pk2Error("Windows could not decode this text file.");
+    }
+    result.text.resize(static_cast<std::size_t>(ansiSize));
+    MultiByteToWideChar(CP_ACP, 0, data, size, result.text.data(), ansiSize);
+    return result;
+}
+
+std::vector<std::uint8_t> encodeTextFile(const std::wstring& text,
+                                         TextFileEncoding encoding) {
+    std::vector<std::uint8_t> output;
+    if (encoding == TextFileEncoding::Utf16LittleEndian ||
+        encoding == TextFileEncoding::Utf16BigEndian) {
+        output = encoding == TextFileEncoding::Utf16LittleEndian
+                     ? std::vector<std::uint8_t>{0xFF, 0xFE}
+                     : std::vector<std::uint8_t>{0xFE, 0xFF};
+        output.reserve(2 + text.size() * 2);
+        for (const auto value : text) {
+            const auto code = static_cast<std::uint16_t>(value);
+            if (encoding == TextFileEncoding::Utf16LittleEndian) {
+                output.push_back(static_cast<std::uint8_t>(code & 0xFF));
+                output.push_back(static_cast<std::uint8_t>(code >> 8));
+            } else {
+                output.push_back(static_cast<std::uint8_t>(code >> 8));
+                output.push_back(static_cast<std::uint8_t>(code & 0xFF));
+            }
+        }
+        return output;
+    }
+
+    std::string encoded;
+    if (encoding == TextFileEncoding::Ansi) {
+        const auto size = text.empty() ? 0 : WideCharToMultiByte(
+            CP_ACP, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+        encoded.resize(static_cast<std::size_t>(size));
+        if (size > 0) {
+            WideCharToMultiByte(CP_ACP, 0, text.data(), static_cast<int>(text.size()),
+                                encoded.data(), size, nullptr, nullptr);
+        }
+    } else {
+        encoded = toUtf8(text);
+    }
+    if (encoding == TextFileEncoding::Utf8Bom) {
+        output = {0xEF, 0xBB, 0xBF};
+    }
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    return output;
+}
+
+void editTextEntry(const pk2::EntryInfo& entry) {
+    try {
+        const auto bytes = gArchive.readFile(entry.path);
+        if (bytes.size() > 64u * 1024u * 1024u) {
+            throw pk2::Pk2Error("Text files larger than 64 MB cannot be edited in the app.");
+        }
+        const auto decoded = decodeTextFile(bytes);
+        if (decoded.text.find(L'\0') != std::wstring::npos) {
+            throw pk2::Pk2Error("This .txt file contains null characters and cannot be safely edited.");
+        }
+
+        TextEditorState state;
+        state.title = L"Edit " + toWide(entry.path);
+        state.text = decoded.text;
+        if (DialogBoxParamW(gInstance, MAKEINTRESOURCEW(IDD_TEXT_EDITOR), gMain,
+                            textEditorDialogProc, reinterpret_cast<LPARAM>(&state)) != IDOK) {
+            return;
+        }
+
+        auto output = encodeTextFile(state.text, decoded.encoding);
+        gArchive.importFileBytes(std::move(output), entry.path);
+        gArchive.save();
+        updateTitle();
+        populateSearchResults();
+        setStatus(L"Text file updated and PK2 saved.");
+    } catch (const std::exception& ex) {
+        showError(ex);
+    }
+}
+
 void createControls(HWND window) {
     gTree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
                             WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_HASBUTTONS | TVS_LINESATROOT,
@@ -1621,6 +1857,15 @@ void createControls(HWND window) {
     gList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                             WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
                             0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_LIST), gInstance, nullptr);
+    gSearch = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                              0, 0, 0, 0, window, reinterpret_cast<HMENU>(IDC_SEARCH), gInstance, nullptr);
+    SendMessageW(gSearch, EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"Search files and folders inside the PK2..."));
+    gSearchButton = CreateWindowExW(0, L"BUTTON", L"Search",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                                    0, 0, 0, 0, window,
+                                    reinterpret_cast<HMENU>(IDC_SEARCH_BUTTON), gInstance, nullptr);
     gStatus = CreateWindowExW(0, STATUSCLASSNAMEW, L"",
                               WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
                               window, reinterpret_cast<HMENU>(IDC_STATUS), gInstance, nullptr);
@@ -1675,8 +1920,16 @@ void layoutControls(HWND window) {
                std::max<LONG>(0, progressRect.bottom - progressRect.top - 6),
                TRUE);
 
+    constexpr int searchHeight = 28;
     MoveWindow(gTree, 0, 0, treeWidth, height, TRUE);
-    MoveWindow(gList, treeWidth, 0, width - treeWidth, height, TRUE);
+    constexpr LONG searchButtonWidth = 76;
+    MoveWindow(gSearch, treeWidth + 4, 4,
+               std::max<LONG>(0, width - treeWidth - searchButtonWidth - 12),
+               searchHeight - 8, TRUE);
+    MoveWindow(gSearchButton, width - searchButtonWidth - 4, 3,
+               searchButtonWidth, searchHeight - 6, TRUE);
+    MoveWindow(gList, treeWidth, searchHeight, width - treeWidth,
+               std::max<LONG>(0, height - searchHeight), TRUE);
 }
 
 void handleNotify(LPARAM lParam) {
@@ -1724,6 +1977,8 @@ void handleNotify(LPARAM lParam) {
         const auto info = gArchive.find(*selected);
         if (info && info->type == pk2::EntryType::Folder) {
             populateList(*selected);
+        } else if (info && isTextEntry(*info)) {
+            editTextEntry(*info);
         }
     }
 }
@@ -1745,7 +2000,19 @@ void handleDropFiles(HDROP drop) {
         return;
     }
     if (!gLoaded) {
-        setStatus(L"Open a PK2 before dropping files.");
+        if (paths.size() != 1) {
+            setStatus(L"Drop one .pk2 file to open it.");
+            return;
+        }
+        auto extension = paths.front().extension().wstring();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+        if (extension != L".pk2" ||
+            !isRegularFileChecked(paths.front(), "Could not inspect dropped PK2")) {
+            setStatus(L"Drop a valid .pk2 file to open it.");
+            return;
+        }
+        openArchivePath(paths.front());
         return;
     }
     startImportPaths(std::move(paths), gCurrentFolder);
@@ -1767,6 +2034,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_COMMAND:
         if (gBusy) {
             setStatus(L"Please wait for the current operation to finish.");
+            return 0;
+        }
+        if (LOWORD(wParam) == IDC_SEARCH_BUTTON && HIWORD(wParam) == BN_CLICKED) {
+            if (gLoaded) {
+                populateSearchResults();
+            } else {
+                setStatus(L"Open a PK2 before searching.");
+            }
             return 0;
         }
         switch (LOWORD(wParam)) {

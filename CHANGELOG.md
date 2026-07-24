@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 - 2026-07-24
+
+### Highlights
+
+- Added archive-wide search for files and folders by name or internal path.
+- Added drag-and-drop opening of a `.pk2` file when no archive is loaded.
+- Added an integrated text editor for `.txt` files stored inside PK2 archives.
+
+### Search and text editing
+
+- Run searches explicitly with the new **Search** button instead of searching after every typed character.
+- Double-click a `.txt` entry to open, edit, and save it directly inside the archive.
+- Save text changes and the containing PK2 automatically while retaining the existing `.bak` safety backup.
+- Preserve ANSI, UTF-8, UTF-8 BOM, UTF-16 little-endian, and UTF-16 big-endian text encodings.
+- Support editable text files up to 64 MB and reject null-containing files that cannot be safely handled as text.
+
+### Workflow and reliability
+
+- Open a PK2 by dragging a single `.pk2` file onto the empty application window.
+- Keep the existing drag-and-drop import behavior when an archive is already open.
+- Enable standard MSVC C++ exception-unwind semantics across Windows builds.
+
 ## 0.2.0 - 2026-07-13
 
 ### Highlights
